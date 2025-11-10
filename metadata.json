@@ -1,0 +1,5 @@
+{
+  "name": "Yaymon-Learning: Fullstack LMS",
+  "description": "A secure, scalable, and modern full-stack Learning Management System (LMS) with distinct user roles (Admin, Teacher, Student).",
+  "requestFramePermissions": []
+}
