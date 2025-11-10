@@ -6,6 +6,7 @@ import { Logo, UsersIcon, BookOpenIcon, ClipboardListIcon, LogoutIcon, Dashboard
 // --- CONTEXTS ---
 type AuthContextType = {
   user: User | null;
+  loadingAuth: boolean;
   login: (email: string, pass: string) => Promise<void>;
   logout: () => void;
   register: (name: string, email: string, pass: string) => Promise<void>;
@@ -32,24 +33,34 @@ const useToast = () => useContext(ToastContext)!;
 // --- PROVIDERS ---
 const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
+  const [loadingAuth, setLoadingAuth] = useState(true);
+
+  useEffect(() => {
+    const unsubscribe = api.onAuthStateChanged((user) => {
+      setUser(user);
+      setLoadingAuth(false);
+    });
+    return () => unsubscribe();
+  }, []);
 
   const login = async (email: string, pass: string) => {
-    const loggedInUser = await api.login(email, pass);
-    setUser(loggedInUser);
+    await api.login(email, pass);
   };
 
   const register = async (name: string, email: string, pass: string) => {
-    const newUser = await api.register(name, email, pass);
-    setUser(newUser);
+    await api.register(name, email, pass);
   };
 
-  const logout = () => setUser(null);
+  const logout = async () => {
+    await api.logout();
+    setUser(null);
+  };
   
   const updateUserContext = (updatedUser: Partial<User>) => {
       setUser(currentUser => currentUser ? {...currentUser, ...updatedUser} : null);
   }
 
-  return <AuthContext.Provider value={{ user, login, logout, register, updateUserContext }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ user, loadingAuth, login, logout, register, updateUserContext }}>{children}</AuthContext.Provider>;
 };
 
 const NavProvider: FC<{ children: ReactNode }> = ({ children }) => {
@@ -190,14 +201,14 @@ const Header = () => {
           {user ? (
             <div className="relative">
                 <button onClick={() => setMenuOpen(!menuOpen)} onBlur={() => setTimeout(() => setMenuOpen(false), 150)} className="flex items-center space-x-2">
-                    <img src={user.profilePhotoUrl} alt="profile" className="w-10 h-10 rounded-full border-2 border-primary-500"/>
+                    <img src={user.profilePhotoUrl} alt="profile" className="w-10 h-10 rounded-full border-2 border-primary-500 object-cover"/>
                     <ChevronDownIcon />
                 </button>
                 {menuOpen && (
                     <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg py-1 z-50">
                         <a onClick={() => { setPage('dashboard'); setMenuOpen(false); }} className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer">Dashboard</a>
                         <a onClick={() => { setPage('profile'); setMenuOpen(false); }} className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer">Profile</a>
-                        <a onClick={() => { logout(); setMenuOpen(false); setPage('landing'); }} className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer">Logout</a>
+                        <a onClick={async () => { await logout(); setMenuOpen(false); setPage('landing'); }} className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer">Logout</a>
                     </div>
                 )}
             </div>
@@ -232,7 +243,8 @@ const LandingPage = () => {
     const [courses, setCourses] = useState<CourseWithTeacherInfo[]>([]);
     
     useEffect(() => {
-        api.getCourses().then(setCourses);
+        const unsubscribe = api.onPublishedCoursesUpdate(setCourses);
+        return () => unsubscribe();
     }, []);
 
     return (
@@ -270,7 +282,7 @@ const LandingPage = () => {
                                                 <p className="text-xs text-gray-700">Instructor</p>
                                             </div>
                                         </div>
-                                        <span className="bg-primary-100 text-primary-800 text-xs font-semibold px-3 py-1 rounded-full">{course.lessons.length} Lessons</span>
+                                        <span className="bg-primary-100 text-primary-800 text-xs font-semibold px-3 py-1 rounded-full">{course.lessons?.length || 0} Lessons</span>
                                     </div>
                                 </div>
                             </div>
@@ -349,6 +361,7 @@ const CoursePage = () => {
     const [course, setCourse] = useState<Course | null>(null);
     const [enrollment, setEnrollment] = useState<Enrollment | undefined>(undefined);
     const [loading, setLoading] = useState(true);
+    const { showToast } = useToast();
 
     const checkEnrollment = useCallback(async () => {
         if (user && user.role === Role.STUDENT && pageParams.id) {
@@ -371,9 +384,10 @@ const CoursePage = () => {
         if (user && user.role === Role.STUDENT && course) {
             try {
                 await api.createEnrollment(user.id, course.id);
+                showToast("Enrollment request sent!", "success");
                 checkEnrollment();
             } catch(err) {
-                alert((err as Error).message);
+                showToast((err as Error).message, 'error');
             }
         }
     }
@@ -401,7 +415,7 @@ const CoursePage = () => {
                     
                     <h2 className="text-2xl font-bold text-gray-800 mb-4 mt-8">Lessons</h2>
                     <div className="space-y-4">
-                        {course.lessons.map((lesson, index) => {
+                        {(course.lessons || []).map((lesson, index) => {
                             const isLocked = index > 0 && (!user || (user.role === Role.STUDENT && !isEnrolledAndApproved));
                             return (
                                 <div 
@@ -480,7 +494,8 @@ const LessonViewPage = () => {
     const handleEnroll = async () => {
         if (user && user.role === Role.STUDENT && course) {
             try {
-                const newEnrollment = await api.createEnrollment(user.id, course.id);
+                await api.createEnrollment(user.id, course.id);
+                const newEnrollment = await api.getEnrollmentForStudent(user.id, course.id);
                 setEnrollment(newEnrollment);
                 showToast("Enrollment request sent!", "success");
             } catch(err) {
@@ -492,9 +507,9 @@ const LessonViewPage = () => {
     if (loading) return <div className="text-center p-20">Loading lesson...</div>;
     if (!course || !lessonId) return <div className="text-center p-20">Lesson not found.</div>;
 
-    const currentLessonIndex = course.lessons.findIndex(l => l.id === lessonId);
+    const currentLessonIndex = (course.lessons || []).findIndex(l => l.id === lessonId);
+    if (currentLessonIndex === -1) return <div className="text-center p-20">Lesson not found in this course.</div>;
     const currentLesson = course.lessons[currentLessonIndex];
-    if (!currentLesson) return <div className="text-center p-20">Lesson not found in this course.</div>;
     
     const isEnrolledAndApproved = enrollment?.status === EnrollmentStatus.APPROVED;
     const isFirstLesson = currentLessonIndex === 0;
@@ -519,7 +534,7 @@ const LessonViewPage = () => {
                         </button>
                         <h3 className="text-lg font-bold text-gray-800 mb-3">{course.title}</h3>
                         <ul className="space-y-1">
-                            {course.lessons.map((lesson, index) => {
+                            {(course.lessons || []).map((lesson, index) => {
                                 const isLockedForPlaylist = index > 0 && !isEnrolledAndApproved;
                                 const isCurrent = lesson.id === currentLesson.id;
                                 return (
@@ -611,7 +626,7 @@ const DashboardPage = () => {
 };
 
 const DashboardLayout: FC<{ children: ReactNode, navItems: { label: string; icon: ReactNode; view: string }[], currentView: string, setView: (view: string) => void }> = ({ children, navItems, currentView, setView }) => {
-    const { user, logout } = useAuth();
+    const { logout } = useAuth();
     const { setPage } = useNav();
 
     return (
@@ -639,7 +654,7 @@ const DashboardLayout: FC<{ children: ReactNode, navItems: { label: string; icon
                     <a onClick={() => setPage('profile')} className="flex items-center space-x-3 px-4 py-3 my-1 rounded-md cursor-pointer hover:bg-gray-700 text-gray-300 hover:text-white">
                         <UserCircleIcon /><span>Profile</span>
                     </a>
-                    <a onClick={() => { logout(); setPage('landing'); }} className="flex items-center space-x-3 px-4 py-3 my-1 rounded-md cursor-pointer hover:bg-gray-700 text-gray-300 hover:text-white">
+                    <a onClick={async () => { await logout(); setPage('landing'); }} className="flex items-center space-x-3 px-4 py-3 my-1 rounded-md cursor-pointer hover:bg-gray-700 text-gray-300 hover:text-white">
                         <LogoutIcon /><span>Logout</span>
                     </a>
                 </div>
@@ -688,10 +703,7 @@ const UserFormModal: FC<{isOpen: boolean, onClose: () => void, onSave: () => voi
 
         try {
             if (isEditMode) {
-                const updatedUserData: User = { ...user, name, email, role };
-                if (password) {
-                    updatedUserData.password = password;
-                }
+                const updatedUserData: Partial<User> & {id: string} = { id: user.id, name, email, role };
                 await api.updateUser(updatedUserData);
             } else {
                  if(!password) {
@@ -730,7 +742,7 @@ const UserFormModal: FC<{isOpen: boolean, onClose: () => void, onSave: () => voi
                 </div>
                  <div>
                     <label className="block text-sm font-medium text-gray-700">Password</label>
-                    <Input type="password" placeholder={isEditMode ? "Leave blank to keep unchanged" : ""} value={password} onChange={e => setPassword(e.target.value)} required={!isEditMode} />
+                    <Input type="password" placeholder={isEditMode ? "Cannot be changed here" : ""} value={password} onChange={e => setPassword(e.target.value)} required={!isEditMode} disabled={isEditMode} />
                 </div>
                  <div>
                     <label className="block text-sm font-medium text-gray-700">Role</label>
@@ -746,27 +758,18 @@ const UserFormModal: FC<{isOpen: boolean, onClose: () => void, onSave: () => voi
 const AdminUserManagement = () => {
     const [users, setUsers] = useState<User[]>([]);
     const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingUser, setEditingUser] = useState<User | null>(null);
     const { showToast } = useToast();
 
-    const fetchUsers = useCallback(async () => {
-        setLoading(true);
-        setError(null);
-        try {
-            const fetchedUsers = await api.getUsers();
-            setUsers(fetchedUsers);
-        } catch (err) {
-            setError("Failed to fetch users.");
-        } finally {
-            setLoading(false);
-        }
-    }, []);
-
     useEffect(() => {
-        fetchUsers();
-    }, [fetchUsers]);
+        setLoading(true);
+        const unsubscribe = api.onUsersUpdate((fetchedUsers) => {
+            setUsers(fetchedUsers);
+            setLoading(false);
+        });
+        return () => unsubscribe();
+    }, []);
 
     const handleOpenCreateModal = () => {
         setEditingUser(null);
@@ -782,7 +785,6 @@ const AdminUserManagement = () => {
         if (window.confirm("Are you sure you want to delete this user? This action cannot be undone.")) {
             try {
                 await api.deleteUser(userId);
-                setUsers(prevUsers => prevUsers.filter(u => u.id !== userId));
                 showToast('User deleted successfully', 'success');
             } catch (err) {
                 showToast('Failed to delete user.', 'error');
@@ -793,12 +795,10 @@ const AdminUserManagement = () => {
     const handleSaveUser = () => {
         setIsModalOpen(false);
         setEditingUser(null);
-        fetchUsers();
         showToast('User saved successfully.', 'success');
     }
 
     if (loading) return <div>Loading users...</div>;
-    if (error) return <div className="text-red-500">{error}</div>;
 
     return (
         <div className="bg-white p-6 rounded-lg shadow-md">
@@ -892,39 +892,24 @@ interface CourseWithTeacher extends Course {
 }
 
 const AdminContentAudit = () => {
-    const [courses, setCourses] = useState<CourseWithTeacher[]>([]);
+    const [courses, setCourses] = useState<Course[]>([]);
+    const [users, setUsers] = useState<User[]>([]);
     const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
     const [openCourseId, setOpenCourseId] = useState<string | null>(null);
-    
     const [selectedLesson, setSelectedLesson] = useState<Lesson | null>(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
 
     useEffect(() => {
-        const fetchContent = async () => {
-            try {
-                setLoading(true);
-                const [allCourses, allUsers] = await Promise.all([
-                    api.getAllCoursesForAdmin(),
-                    api.getUsers()
-                ]);
-
-                const usersMap = new Map(allUsers.map(user => [user.id, user.name]));
-
-                const coursesWithTeacherData = allCourses.map(course => ({
-                    ...course,
-                    teacherName: usersMap.get(course.teacherId) || 'Unknown Teacher'
-                }));
-
-                setCourses(coursesWithTeacherData);
-            } catch (err) {
-                setError("Failed to fetch content data.");
-            } finally {
-                setLoading(false);
-            }
+        setLoading(true);
+        const unsubCourses = api.onAllCoursesForAdminUpdate(setCourses);
+        const unsubUsers = api.onUsersUpdate((users) => {
+            setUsers(users);
+            setLoading(false);
+        });
+        return () => {
+            unsubCourses();
+            unsubUsers();
         };
-
-        fetchContent();
     }, []);
     
     const handleViewLesson = (lesson: Lesson) => {
@@ -933,13 +918,18 @@ const AdminContentAudit = () => {
     };
 
     if (loading) return <div>Loading content...</div>;
-    if (error) return <div className="text-red-500">{error}</div>;
+    
+    const usersMap = new Map(users.map(user => [user.id, user.name]));
+    const coursesWithTeacherData = courses.map(course => ({
+        ...course,
+        teacherName: usersMap.get(course.teacherId) || 'Unknown Teacher'
+    }));
 
     return (
         <div className="bg-white p-6 rounded-lg shadow-md">
             <h2 className="text-2xl font-bold text-gray-800 mb-6">Content Audit</h2>
             <div className="space-y-4">
-                {courses.map(course => (
+                {coursesWithTeacherData.map(course => (
                     <div key={course.id} className="border rounded-lg overflow-hidden">
                         <button 
                             onClick={() => setOpenCourseId(openCourseId === course.id ? null : course.id)}
@@ -953,7 +943,7 @@ const AdminContentAudit = () => {
                         </button>
                         {openCourseId === course.id && (
                             <div className="p-4 border-t">
-                                {course.lessons.length > 0 ? (
+                                {(course.lessons || []).length > 0 ? (
                                     <ul className="space-y-2">
                                         {course.lessons.map((lesson, index) => (
                                             <li key={lesson.id} className="flex justify-between items-center p-3 bg-white rounded-md border">
@@ -984,28 +974,19 @@ const AdminEnrollmentManagement = () => {
     const [loading, setLoading] = useState(true);
     const { showToast } = useToast();
 
-    const fetchEnrollments = useCallback(async () => {
-        setLoading(true);
-        try {
-            const data = await api.getEnrollmentsForAdmin();
-            setEnrollments(data);
-        } catch (error) {
-            showToast('Failed to fetch enrollment data', 'error');
-        } finally {
-            setLoading(false);
-        }
-    }, [showToast]);
-
     useEffect(() => {
-        fetchEnrollments();
-    }, [fetchEnrollments]);
+        setLoading(true);
+        const unsubscribe = api.onEnrollmentsForAdminUpdate((data) => {
+            setEnrollments(data);
+            setLoading(false);
+        });
+        return () => unsubscribe();
+    }, []);
     
     const handleStatusUpdate = async (enrollmentId: string, status: EnrollmentStatus) => {
         try {
             await api.updateEnrollmentStatus(enrollmentId, status);
             showToast(`Enrollment ${status.toLowerCase()}.`, 'success');
-            // Refresh the list to show the change
-            fetchEnrollments();
         } catch (error) {
             showToast('Failed to update status.', 'error');
         }
@@ -1484,7 +1465,6 @@ const TeacherCourseDetail: FC<{ course: Course; onBack: () => void }> = ({ cours
     const draggedItemIndex = useRef<number | null>(null);
     const dragOverItemIndex = useRef<number | null>(null);
 
-
     const refreshCourse = useCallback(async () => {
         setLoading(true);
         try {
@@ -1496,6 +1476,12 @@ const TeacherCourseDetail: FC<{ course: Course; onBack: () => void }> = ({ cours
             setLoading(false);
         }
     }, [course.id, showToast]);
+
+    useEffect(() => {
+        // Initial load
+        refreshCourse();
+    }, [refreshCourse]);
+
 
     const handleOpenCreateModal = () => {
         setEditingLesson(null);
@@ -1520,9 +1506,9 @@ const TeacherCourseDetail: FC<{ course: Course; onBack: () => void }> = ({ cours
     };
 
     const handleConfirmDelete = async () => {
-        if (!lessonToDelete) return;
+        if (!lessonToDelete || !currentCourse) return;
         try {
-            await api.deleteLessonFromCourse(course.id, lessonToDelete.id);
+            await api.deleteLessonFromCourse(currentCourse.id, lessonToDelete.id);
             showToast("Lesson deleted successfully!", "success");
             refreshCourse();
         } catch (error) {
@@ -1544,7 +1530,7 @@ const TeacherCourseDetail: FC<{ course: Course; onBack: () => void }> = ({ cours
     
         setCurrentCourse(prevCourse => {
             if (!prevCourse) return null;
-            const newLessons = [...prevCourse.lessons];
+            const newLessons = [...(prevCourse.lessons || [])];
             const draggedItem = newLessons.splice(draggedItemIndex.current!, 1)[0];
             newLessons.splice(dragOverItemIndex.current!, 0, draggedItem);
             draggedItemIndex.current = dragOverItemIndex.current;
@@ -1553,14 +1539,13 @@ const TeacherCourseDetail: FC<{ course: Course; onBack: () => void }> = ({ cours
     };
 
     const handleDragEnd = async () => {
-        if (currentCourse) {
+        if (currentCourse && currentCourse.lessons) {
             const newLessonOrder = currentCourse.lessons.map(l => l.id);
             try {
                 await api.reorderLessons(currentCourse.id, newLessonOrder);
                 showToast("Lesson order saved!", "success");
             } catch (error) {
                 showToast("Failed to save new lesson order.", "error");
-                // Optionally revert UI changes or refresh from server
                 refreshCourse();
             }
         }
@@ -1586,7 +1571,7 @@ const TeacherCourseDetail: FC<{ course: Course; onBack: () => void }> = ({ cours
             </div>
             
             <div className="space-y-3">
-                {currentCourse.lessons.length > 0 ? (
+                {(currentCourse.lessons || []).length > 0 ? (
                     currentCourse.lessons.map((lesson, index) => (
                          <div 
                             key={lesson.id} 
@@ -1642,28 +1627,19 @@ const TeacherCourseManagement: FC<{ onManageCourse: (course: Course) => void }> 
     const { user } = useAuth();
     const [courses, setCourses] = useState<Course[]>([]);
     const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingCourse, setEditingCourse] = useState<Course | null>(null);
     const { showToast } = useToast();
     
-    const fetchCourses = useCallback(async () => {
+    useEffect(() => {
         if (!user || user.role !== Role.TEACHER) return;
         setLoading(true);
-        setError(null);
-        try {
-            const fetchedCourses = await api.getCoursesByTeacherId(user.id);
+        const unsubscribe = api.onTeacherCoursesUpdate(user.id, (fetchedCourses) => {
             setCourses(fetchedCourses);
-        } catch (err) {
-            setError("Failed to fetch courses.");
-        } finally {
             setLoading(false);
-        }
+        });
+        return () => unsubscribe();
     }, [user]);
-
-    useEffect(() => {
-        fetchCourses();
-    }, [fetchCourses]);
 
     const handleOpenCreateModal = () => {
         setEditingCourse(null);
@@ -1680,7 +1656,6 @@ const TeacherCourseManagement: FC<{ onManageCourse: (course: Course) => void }> 
             try {
                 await api.deleteCourse(courseId);
                 showToast("Course deleted successfully", "success");
-                fetchCourses();
             } catch (err) {
                 showToast("Failed to delete course.", "error");
             }
@@ -1690,7 +1665,6 @@ const TeacherCourseManagement: FC<{ onManageCourse: (course: Course) => void }> 
     const handleSaveCourse = () => {
         setIsModalOpen(false);
         setEditingCourse(null);
-        fetchCourses();
         showToast('Course saved successfully.', 'success');
     };
 
@@ -1705,7 +1679,6 @@ const TeacherCourseManagement: FC<{ onManageCourse: (course: Course) => void }> 
 
     if (!user) return null;
     if (loading) return <div>Loading courses...</div>;
-    if (error) return <div className="text-red-500">{error}</div>;
 
     return (
          <div className="bg-white p-6 rounded-lg shadow-md">
@@ -1802,9 +1775,12 @@ const StudentEnrolledCourses = () => {
 
     useEffect(() => {
         if (user) {
-            api.getEnrolledCoursesByStudentId(user.id)
-                .then(setCourses)
-                .finally(() => setLoading(false));
+            setLoading(true);
+            const unsubscribe = api.onStudentEnrolledCoursesUpdate(user.id, (enrolledCourses) => {
+                setCourses(enrolledCourses);
+                setLoading(false);
+            });
+            return () => unsubscribe();
         }
     }, [user]);
 
@@ -1851,9 +1827,12 @@ const StudentBrowseCourses = () => {
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        api.getCourses()
-            .then(setCourses)
-            .finally(() => setLoading(false));
+        setLoading(true);
+        const unsubscribe = api.onPublishedCoursesUpdate((publishedCourses) => {
+            setCourses(publishedCourses);
+            setLoading(false);
+        });
+        return () => unsubscribe();
     }, []);
 
     if (loading) return <div className="text-center p-10">Loading courses...</div>;
@@ -1882,7 +1861,7 @@ const StudentBrowseCourses = () => {
                                             <p className="text-xs text-gray-700">Instructor</p>
                                         </div>
                                     </div>
-                                    <span className="bg-primary-100 text-primary-800 text-xs font-semibold px-3 py-1 rounded-full">{course.lessons.length} Lessons</span>
+                                    <span className="bg-primary-100 text-primary-800 text-xs font-semibold px-3 py-1 rounded-full">{course.lessons?.length || 0} Lessons</span>
                                 </div>
                             </div>
                         </div>
@@ -1939,10 +1918,13 @@ const ProfilePage = () => {
                 updatedUserData.newProfilePhoto = profilePhoto;
             }
 
-            const updatedUser = await api.updateUser(updatedUserData);
-            updateUserContext(updatedUser);
+            await api.updateUser(updatedUserData);
+            
+            // The Auth context listener will automatically update the user state
+            // but we can update the local state for immediate feedback
+            updateUserContext({ ...updatedUserData, profilePhotoUrl: photoPreview || user.profilePhotoUrl });
+            
             setProfilePhoto(null);
-            setPhotoPreview(updatedUser.profilePhotoUrl);
             setIsEditing(false);
             showToast("Profile updated successfully!", "success");
         } catch (error) {
@@ -1958,8 +1940,8 @@ const ProfilePage = () => {
         setIsEditing(false);
     }
 
-    const handleLogout = () => {
-        logout();
+    const handleLogout = async () => {
+        await logout();
         setPage('landing');
         showToast("You have been successfully logged out.", "success");
     };
@@ -1984,7 +1966,7 @@ const ProfilePage = () => {
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700">Email</label>
-                        <Input type="email" value={email} onChange={e => setEmail(e.target.value)} disabled={!isEditing} />
+                        <Input type="email" value={email} onChange={e => setEmail(e.target.value)} disabled={true} />
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700">Role</label>
@@ -2041,7 +2023,11 @@ function App() {
 // Separate component to access contexts
 const Main = () => {
   const { page, pageParams } = useNav();
-  const { user } = useAuth();
+  const { user, loadingAuth } = useAuth();
+
+  if (loadingAuth) {
+    return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
+  }
 
   const renderPage = () => {
     switch (page) {
